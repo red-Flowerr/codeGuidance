@@ -36,24 +36,29 @@ def compute_placeholder_metrics(generation: LLMGeneration) -> Dict[str, Any]:
 
 
 def compute_entropy_metrics(generation: LLMGeneration) -> Dict[str, Any]:
-    entropies: List[float] = []
+    per_token_entropies: List[Optional[float]] = []
+    numeric_entropies: List[float] = []
     for token in generation.tokens:
+        if getattr(token, "is_special", False):
+            per_token_entropies.append(None)
+            continue
         entropy = _token_entropy(token)
         if entropy is not None:
-            entropies.append(entropy)
+            numeric_entropies.append(entropy)
+        per_token_entropies.append(entropy)
 
-    if not entropies:
+    if not numeric_entropies:
         return {
             "mean_token_entropy": None,
             "max_token_entropy": None,
-            "token_entropies": [],
+            "token_entropies": per_token_entropies,
         }
 
-    mean_entropy = sum(entropies) / len(entropies)
+    mean_entropy = sum(numeric_entropies) / len(numeric_entropies)
     return {
         "mean_token_entropy": mean_entropy,
-        "max_token_entropy": max(entropies),
-        "token_entropies": entropies,
+        "max_token_entropy": max(numeric_entropies),
+        "token_entropies": per_token_entropies,
     }
 
 

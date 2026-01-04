@@ -2,19 +2,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from html import escape
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .dataset import DatasetRecord, iter_dataset
-from .llm_client import LLMClient, LLMGeneration
-from .metrics import (
-    compute_entropy_metrics,
-    compute_exact_match,
-    compute_latency_metric,
-    compute_length_metrics,
-    compute_placeholder_metrics,
-    compute_syntax_validity,
-)
+from .llm_client import LLMClient, LLMGeneration, LLMToken
+from .metrics import compute_entropy_metrics
 
 
 MetricFunction = Callable[[LLMGeneration, DatasetRecord], Dict[str, Any]]
@@ -29,6 +23,7 @@ class ObserverConfig:
     include_tokens: bool = False
     include_raw_response: bool = False
     extra_request_args: Dict[str, Any] = field(default_factory=dict)
+    html_report_path: Optional[Path] = None
 
 
 @dataclass(slots=True)
@@ -36,6 +31,7 @@ class Observation:
     record_id: str
     metrics: Dict[str, Any]
     response_text: str
+    tokens: List[LLMToken]
     metadata: Dict[str, Any]
 
     def to_json_dict(self) -> Dict[str, Any]:
@@ -61,12 +57,7 @@ class LLMObserverRunner:
         self.client = client
         self.config = config or ObserverConfig()
         self.metric_functions: List[MetricFunction] = [
-            lambda generation, record: compute_latency_metric(generation),
-            lambda generation, record: compute_length_metrics(generation),
-            lambda generation, record: compute_placeholder_metrics(generation),
             lambda generation, record: compute_entropy_metrics(generation),
-            lambda generation, record: compute_syntax_validity(generation, record),
-            lambda generation, record: compute_exact_match(generation, record),
         ]
         if additional_metrics:
             self.metric_functions.extend(additional_metrics)
@@ -89,6 +80,7 @@ class LLMObserverRunner:
                     record_id=record.identifier,
                     metrics=metrics,
                     response_text=generation.text,
+                    tokens=generation.tokens,
                     metadata=metadata,
                 )
 
@@ -99,6 +91,9 @@ class LLMObserverRunner:
         finally:
             if writer:
                 writer.close()
+
+        if self.config.html_report_path:
+            self._write_html_report(observations)
 
         return observations
 
@@ -122,6 +117,7 @@ class LLMObserverRunner:
                     "text": token.text,
                     "logprob": token.logprob,
                     "top_logprobs": token.top_logprobs,
+                    "is_special": token.is_special,
                 }
                 for token in generation.tokens
             ]
@@ -134,3 +130,260 @@ class LLMObserverRunner:
         path = self.config.save_path
         path.parent.mkdir(parents=True, exist_ok=True)
         return path.open("w", encoding="utf-8")
+
+    def _write_html_report(self, observations: List[Observation]) -> None:
+        assert self.config.html_report_path is not None
+        path = self.config.html_report_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        def format_token_text(text: str) -> str:
+            # Encode special characters so whitespace and control chars remain visible.
+            display = text.encode("unicode_escape").decode("ascii")
+            return escape(display)
+
+        def sanitize_id(value: str, fallback: str) -> str:
+            safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in value)
+            safe = safe.strip("-")
+            return safe or fallback
+
+        with path.open("w", encoding="utf-8") as handle:
+            handle.write("<!DOCTYPE html><html><head><meta charset='utf-8'>")
+            handle.write("<title>LLM Token Entropy Report</title>")
+            handle.write(
+                "<style>"
+                "body{font-family:system-ui,-apple-system,\"Segoe UI\",sans-serif;background:#f5f6fb;color:#1f2530;margin:0;padding:24px;}"
+                "h1{margin-top:0;font-size:28px;color:#182140;}"
+                "h2{margin-top:48px;font-size:22px;color:#273352;}"
+                "h3{margin-top:24px;font-size:18px;color:#2f3b62;}"
+                "nav{position:sticky;top:0;padding:12px 16px;margin:-24px -24px 24px;background:#fff;border-bottom:1px solid #d8deeb;display:flex;gap:16px;align-items:center;z-index:1;}"
+                "nav strong{font-size:14px;text-transform:uppercase;letter-spacing:0.08em;color:#5c6786;}"
+                "nav ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:12px;}"
+                "nav a{text-decoration:none;color:#2a4ac5;background:#e7ecff;padding:6px 10px;border-radius:6px;font-size:13px;font-family:monospace;}"
+                "nav a:hover{background:#d4defd;}"
+                "section{background:#fff;border:1px solid #e1e6f3;box-shadow:0 8px 16px rgba(15,23,42,0.06);border-radius:10px;padding:24px;margin-bottom:32px;}"
+                ".summary{list-style:none;margin:16px 0;padding:0;display:flex;flex-wrap:wrap;gap:16px;background:#f7f8fe;border:1px solid #e3e8f8;border-radius:8px;padding:16px;}"
+                ".summary li{min-width:200px;font-family:monospace;font-size:14px;color:#3a4663;}"
+                "pre{background:#0d1117;color:#e6edf3;padding:16px;border-radius:8px;overflow:auto;font-size:13px;line-height:1.55;}"
+                "table{border-collapse:collapse;width:100%;margin-top:18px;font-family:monospace;font-size:13px;}"
+                "thead th{position:sticky;top:48px;background:#eef2ff;z-index:1;}"
+                "th,td{border:1px solid #d5dcf0;padding:6px 8px;text-align:left;vertical-align:top;}"
+                "tbody tr:nth-child(odd){background:#fbfcff;}"
+                "tbody tr:hover{background:#f1f4ff;}"
+                ".token{white-space:pre;font-weight:600;color:#1c2543;}"
+                ".entropy-cell{position:relative;}"
+                ".entropy-cell[data-entropy='nan']{background:#f7f8fe;color:#7b849d;}"
+                ".top-logprobs{min-width:220px;}"
+                ".top-logprobs div{display:flex;justify-content:space-between;gap:12px;padding:2px 0;border-bottom:1px dotted #dde3f8;}"
+                ".top-logprobs div:last-child{border-bottom:none;}"
+                ".candidate{color:#1f2d5c;}"
+                ".score{color:#5c6786;}"
+                ".token-index{color:#607099;font-weight:500;}"
+                ".token-stream{display:flex;flex-wrap:wrap;gap:6px;padding:12px;border:1px solid #e3e8f8;background:#f9faff;border-radius:8px;margin-top:12px;}"
+                ".token-chip{display:inline-flex;align-items:center;padding:4px 8px;border-radius:6px;font-family:monospace;font-size:12px;color:#19213b;white-space:pre;box-shadow:0 1px 2px rgba(31,37,48,0.12);border:1px solid rgba(52,82,145,0.08);transition:transform 0.1s ease, box-shadow 0.1s ease;}"
+                ".token-chip:hover{box-shadow:0 4px 10px rgba(31,37,48,0.18);transform:translateY(-1px);}"
+                ".token-chip.whitespace{color:#6b738a;background:#eef1fa;border-style:dashed;}"
+                ".token-chip.high{border-color:#f46f43;box-shadow:0 2px 8px rgba(244,111,67,0.3);}"
+                ".token-chip.hidden{display:none;}"
+                ".controls{display:flex;flex-wrap:wrap;align-items:center;gap:16px;padding:12px 16px;border:1px solid #dfe4f6;background:#f7f8fe;border-radius:8px;margin-bottom:20px;font-family:system-ui,-apple-system,\"Segoe UI\",sans-serif;}"
+                ".controls label{font-size:13px;color:#2d3c66;display:flex;align-items:center;gap:8px;}"
+                ".controls input[type=\"range\"]{width:160px;}"
+                ".legend{display:flex;align-items:center;gap:12px;font-size:12px;color:#4c5675;margin-bottom:20px;font-family:system-ui,-apple-system,\"Segoe UI\",sans-serif;}"
+                ".legend-bar{position:relative;flex:1;height:10px;border-radius:6px;background:linear-gradient(90deg,rgba(244,111,67,0.15) 0%,rgba(244,111,67,0.7) 100%);}"
+                ".legend-bar::before,.legend-bar::after{content:\"\";position:absolute;top:50%;transform:translateY(-50%);width:1px;height:14px;background:#c8cee6;}"
+                ".legend-bar::before{left:0;}"
+                ".legend-bar::after{right:0;}"
+                ".legend span[data-label]{font-size:12px;color:#5d6687;}"
+                "details{margin-top:18px;}"
+                "details summary{cursor:pointer;font-weight:600;color:#2a3a68;margin-bottom:12px;}"
+                "details[open] summary{margin-bottom:12px;}"
+                "@media (max-width:960px){nav{flex-direction:column;align-items:flex-start;}thead th{top:0;}}"
+                "</style></head><body>"
+            )
+            handle.write("<h1>Token Entropy Report</h1>")
+
+            if observations:
+                anchor_counts: Dict[str, int] = {}
+                nav_items: List[tuple[str, Observation]] = []
+                for idx, observation in enumerate(observations):
+                    base_anchor = sanitize_id(observation.record_id, f"record-{idx}")
+                    occurrence = anchor_counts.get(base_anchor, 0)
+                    anchor_counts[base_anchor] = occurrence + 1
+                    safe_anchor = (
+                        base_anchor if occurrence == 0 else f"{base_anchor}-{occurrence}"
+                    )
+                    nav_items.append((safe_anchor, observation))
+
+                handle.write("<nav><strong>Records</strong><ul>")
+                for safe_anchor, observation in nav_items:
+                    handle.write(
+                        f"<li><a href='#{safe_anchor}'>{escape(observation.record_id)}</a></li>"
+                    )
+                handle.write("</ul></nav>")
+
+            if not observations:
+                handle.write("<p>No observations to display.</p>")
+                handle.write("</body></html>")
+                return
+
+            handle.write(
+                "<div class='controls'>"
+                "<label>Highlight entropy ≥ <span id='thresholdValue'>0.50</span></label>"
+                "<input type='range' id='thresholdSlider' min='0' max='3.0' step='0.05' value='0.50'>"
+                "<label><input type='checkbox' id='hideLowEntropy'> Hide lower-entropy tokens</label>"
+                "</div>"
+            )
+            handle.write(
+                "<div class='legend'><span data-label>Low</span>"
+                "<div class='legend-bar'></div><span data-label>High</span></div>"
+            )
+
+            for safe_anchor, observation in nav_items:
+                entropies: List[Optional[float]] = observation.metrics.get("token_entropies") or []
+                mean_entropy = observation.metrics.get("mean_token_entropy")
+                max_entropy = observation.metrics.get("max_token_entropy")
+
+                display_tokens: List[Dict[str, Any]] = []
+                row_index = 0
+                for idx, token in enumerate(observation.tokens):
+                    if token.is_special:
+                        continue
+                    row_index += 1
+                    entropy_value = entropies[idx] if idx < len(entropies) else None
+                    if entropy_value is not None and abs(entropy_value) < 1e-9:
+                        entropy_value = 0.0
+                    top_logprobs = token.top_logprobs or {}
+                    if max_entropy and max_entropy > 0 and entropy_value is not None:
+                        normalized = max(0.0, min(1.0, entropy_value / max_entropy))
+                    else:
+                        normalized = 0.0
+                    highlight_alpha = 0.15 + (0.55 * normalized)
+                    highlight_alpha = max(0.0, min(0.7, highlight_alpha))
+                    entropy_attr = (
+                        f"{entropy_value:.4f}" if entropy_value is not None else "nan"
+                    )
+                    entropy_style = (
+                        f"background-color: rgba(244, 111, 67, {highlight_alpha:.3f});"
+                        if entropy_value is not None
+                        else ""
+                    )
+                    chip_style = entropy_style or "background-color: #e9ecf5;"
+                    top_items_html = "".join(
+                        f"<div><span class='candidate'>{format_token_text(tok)}</span>"
+                        f"<span class='score'>{value:.4f}</span></div>"
+                        for tok, value in top_logprobs.items()
+                    )
+                    display_tokens.append(
+                        {
+                            "row_index": row_index,
+                            "original_index": idx,
+                            "token_text": token.text,
+                            "display_text": format_token_text(token.text),
+                            "logprob": token.logprob,
+                            "entropy": entropy_value,
+                            "entropy_numeric": entropy_value,
+                            "entropy_attr": entropy_attr,
+                            "entropy_style": entropy_style,
+                            "top_items_html": top_items_html,
+                            "is_whitespace": token.text.strip() == "",
+                            "chip_style": chip_style,
+                            "chip_attr": entropy_attr,
+                        }
+                    )
+
+                handle.write(f"<section id='{safe_anchor}'>")
+                handle.write(f"<h2>Record {escape(observation.record_id)}</h2>")
+                handle.write("<ul class='summary'>")
+                if mean_entropy is not None:
+                    handle.write(f"<li>Mean entropy: {mean_entropy:.4f}</li>")
+                if max_entropy is not None:
+                    handle.write(f"<li>Max entropy: {max_entropy:.4f}</li>")
+                handle.write(f"<li>Response length (tokens): {len(display_tokens)}</li>")
+                handle.write("</ul>")
+
+                handle.write("<h3>Generated Response</h3>")
+                handle.write("<pre>")
+                handle.write(escape(observation.response_text))
+                handle.write("</pre>")
+
+                handle.write("<h3>Entropy Overview</h3>")
+                handle.write("<div class='token-stream'>")
+                for token_info in display_tokens:
+                    classes = ["token-chip"]
+                    if token_info["is_whitespace"]:
+                        classes.append("whitespace")
+                    title_parts = [
+                        f"Token #{token_info['row_index']} (orig {token_info['original_index']})",
+                        f"logprob: {token_info['logprob']:.4f}",
+                    ]
+                    entropy_val = token_info["entropy_numeric"]
+                    if entropy_val is not None:
+                        title_parts.append(f"entropy: {entropy_val:.4f}")
+                    else:
+                        title_parts.append("entropy: N/A")
+                    title_attr = " | ".join(title_parts)
+                    handle.write(
+                        f"<span class='{' '.join(classes)}' data-entropy='{token_info['chip_attr']}' "
+                        f"style='{token_info['chip_style']}' title='{escape(title_attr)}'>"
+                        f"{token_info['display_text']}</span>"
+                    )
+                handle.write("</div>")
+
+                handle.write("<h3>Token Details</h3>")
+                handle.write("<details open>")
+                handle.write("<summary>Detailed token metrics</summary>")
+                handle.write(
+                    "<table><thead><tr><th>#</th><th>Token</th><th>Logprob</th>"
+                    "<th>Entropy</th><th>Top Logprobs</th></tr></thead><tbody>"
+                )
+                for token_info in display_tokens:
+                    entropy_attr = token_info["entropy_attr"]
+                    entropy_style = token_info["entropy_style"]
+                    entropy_value = token_info["entropy_numeric"]
+                    handle.write("<tr>")
+                    handle.write(
+                        f"<td class='token-index' title='Original index {token_info['original_index']}'>"
+                        f"{token_info['row_index']}</td>"
+                    )
+                    token_classes = "token whitespace" if token_info["is_whitespace"] else "token"
+                    handle.write(f"<td class='{token_classes}'>{token_info['display_text']}</td>")
+                    logprob_value = token_info["logprob"]
+                    logprob_display = f"{0.0:.4f}" if abs(logprob_value) < 1e-9 else f"{logprob_value:.4f}"
+                    handle.write(f"<td>{logprob_display}</td>")
+                    if entropy_value is not None:
+                        entropy_display = f"{entropy_value:.4f}"
+                        handle.write(
+                            f"<td class='entropy-cell' data-entropy='{entropy_attr}' style='{entropy_style}'>"
+                            f"{entropy_display}</td>"
+                        )
+                    else:
+                        handle.write("<td class='entropy-cell' data-entropy='nan'>N/A</td>")
+                    handle.write(f"<td class='top-logprobs'>{token_info['top_items_html']}</td>")
+                    handle.write("</tr>")
+                handle.write("</tbody></table>")
+                handle.write("</details>")
+
+                handle.write("</section>")
+
+            handle.write(
+                "<script>"
+                "const slider=document.getElementById('thresholdSlider');"
+                "const sliderValue=document.getElementById('thresholdValue');"
+                "const hideLow=document.getElementById('hideLowEntropy');"
+                "const chips=document.querySelectorAll('.token-chip');"
+                "function applyThreshold(){"
+                "const threshold=parseFloat(slider.value);"
+                "sliderValue.textContent=threshold.toFixed(2);"
+                "chips.forEach(chip=>{"
+                "const val=parseFloat(chip.dataset.entropy);"
+                "if(Number.isNaN(val)){chip.classList.remove('high');chip.classList.remove('hidden');return;}"
+                "if(val>=threshold){chip.classList.add('high');chip.classList.remove('hidden');}"
+                "else{chip.classList.remove('high');if(hideLow.checked){chip.classList.add('hidden');}else{chip.classList.remove('hidden');}}"
+                "});"
+                "}"
+                "slider.addEventListener('input',applyThreshold);"
+                "hideLow.addEventListener('change',applyThreshold);"
+                "applyThreshold();"
+                "</script>"
+            )
+
+            handle.write("</body></html>")

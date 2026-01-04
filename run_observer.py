@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from llm_observer.dataset import load_jsonl_dataset
-from llm_observer.llm_client import EchoClient, OpenAIClient
+from llm_observer.llm_client import EchoClient, LocalHFClient, OpenAIClient
 from llm_observer.runner import LLMObserverRunner, ObserverConfig
 
 
@@ -17,6 +17,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--dataset", required=True, help="Path to the JSONL dataset.")
     parser.add_argument("--output", help="Optional path to write observation logs (JSONL).")
+    parser.add_argument(
+        "--html-report",
+        help="Optional path to write an HTML entropy report for each observation.",
+    )
     parser.add_argument(
         "--model",
         default="gpt-4.1-mini",
@@ -28,7 +32,7 @@ def parse_args() -> argparse.Namespace:
         help="Use the Chat Completions API instead of the Responses API.",
     )
     parser.add_argument(
-        "--temperature", type=float, help="Optional temperature override for the LLM request."
+        "--temperature", type=float, default=0.0, help="Optional temperature override for the LLM request."
     )
     parser.add_argument(
         "--max-output-tokens", type=int, help="Optional max output tokens for the LLM request."
@@ -66,6 +70,13 @@ def build_client(args: argparse.Namespace):
     if args.max_output_tokens is not None:
         request_kwargs["max_output_tokens"] = args.max_output_tokens
 
+    model_path = Path(args.model)
+    if model_path.exists():
+        return LocalHFClient(
+            model_path=str(model_path),
+            generation_kwargs=request_kwargs,
+        )
+
     return OpenAIClient(
         model=args.model,
         request_kwargs=request_kwargs,
@@ -75,6 +86,7 @@ def build_client(args: argparse.Namespace):
 
 def build_config(args: argparse.Namespace) -> ObserverConfig:
     save_path = Path(args.output) if args.output else None
+    html_report_path = Path(args.html_report) if args.html_report else None
     extra_request_args: Dict[str, Any] = {}
     if args.temperature is not None:
         extra_request_args["temperature"] = args.temperature
@@ -87,6 +99,7 @@ def build_config(args: argparse.Namespace) -> ObserverConfig:
         include_tokens=args.include_tokens,
         include_raw_response=args.include_raw,
         extra_request_args=extra_request_args,
+        html_report_path=html_report_path,
     )
 
 

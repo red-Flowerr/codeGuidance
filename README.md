@@ -35,3 +35,12 @@ You can attach additional evaluators or metrics by supplying callables to `LLMOb
 ## Outputs
 
 The runner writes each observation as a JSON object containing the response text, collected metrics, and optional metadata (prompt, tokens, raw payload) depending on CLI flags. Use the `logs/observations.jsonl` file to build dashboards or further analytics.
+
+
+python run_observer.py \
+--dataset datasets/livecodebench_sample.jsonl \
+--model /mnt/hdfs/tiktok_aiic/user/codeai/hf_models/Qwen2.5-Coder-7B-Instruct \
+--max-output-tokens 1024 \
+--html-report qwen_entropy_report.html
+
+python run_observer.py --dataset datasets/aime25_prompts.jsonl --model /mnt/hdfs/tiktok_aiic/user/codeai/hf_models/Qwen3-4B-Thinking-2507 --max-output-tokens 2048 --html-report aime25_entropy_report.html
