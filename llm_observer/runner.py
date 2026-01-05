@@ -193,6 +193,19 @@ class LLMObserverRunner:
                 ".legend-bar::before{left:0;}"
                 ".legend-bar::after{right:0;}"
                 ".legend span[data-label]{font-size:12px;color:#5d6687;}"
+                ".response-stream{white-space:pre-wrap;font-family:monospace;font-size:13px;line-height:1.6;background:#fff;border:1px solid #e3e8f8;border-radius:8px;padding:16px;color:#19213b;}"
+                ".response-token{display:inline;white-space:pre;border-radius:4px;padding:2px 3px;margin:0 1px;transition:box-shadow 0.1s ease,transform 0.1s ease;color:inherit;position:relative;}"
+                ".response-token:hover{box-shadow:0 4px 12px rgba(31,37,48,0.18);transform:translateY(-1px);z-index:2;}"
+                ".response-token.whitespace{margin:0;}"
+                ".response-token .tooltip{position:absolute;left:0;bottom:100%;transform:translateY(-6px);background:#1f2530;color:#f8f9ff;padding:8px 10px;border-radius:6px;font-size:12px;line-height:1.45;white-space:normal;box-shadow:0 8px 18px rgba(15,23,42,0.3);opacity:0;visibility:hidden;pointer-events:none;min-width:220px;max-width:320px;}"
+                ".response-token:hover .tooltip{opacity:1;visibility:visible;}"
+                ".response-token .tooltip::after{content:\"\";position:absolute;top:100%;left:12px;border-width:6px;border-style:solid;border-color:#1f2530 transparent transparent transparent;}"
+                ".tooltip-entropy{font-weight:600;margin-bottom:4px;color:#fefefe;}"
+                ".tooltip-logprob{font-family:monospace;font-size:12px;margin-bottom:6px;color:rgba(248,249,255,0.9);}"
+                ".tooltip-logprobs-title{font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:rgba(248,249,255,0.7);margin-bottom:4px;}"
+                ".tooltip-logprobs{display:flex;flex-direction:column;gap:2px;}"
+                ".tooltip-logprob-row{display:flex;justify-content:space-between;gap:12px;font-family:monospace;font-size:12px;color:#fefefe;}"
+                ".tooltip-empty{font-style:italic;color:rgba(248,249,255,0.7);}"
                 "details{margin-top:18px;}"
                 "details summary{cursor:pointer;font-weight:600;color:#2a3a68;margin-bottom:12px;}"
                 "details[open] summary{margin-bottom:12px;}"
@@ -267,18 +280,55 @@ class LLMObserverRunner:
                         else ""
                     )
                     chip_style = entropy_style or "background-color: #e9ecf5;"
+                    logprob_value = token.logprob
+                    top_items = list(top_logprobs.items())
                     top_items_html = "".join(
                         f"<div><span class='candidate'>{format_token_text(tok)}</span>"
                         f"<span class='score'>{value:.4f}</span></div>"
-                        for tok, value in top_logprobs.items()
+                        for tok, value in top_items
                     )
+                    tooltip_rows_html = "".join(
+                        f"<div class='tooltip-logprob-row'><span class='candidate'>{format_token_text(tok)}</span>"
+                        f"<span class='score'>{value:.4f}</span></div>"
+                        for tok, value in top_items
+                    )
+                    if entropy_value is not None:
+                        entropy_display = f"{entropy_value:.4f}"
+                    else:
+                        entropy_display = "N/A"
+                    if logprob_value is not None:
+                        logprob_display = (
+                            f"{0.0:.4f}" if abs(logprob_value) < 1e-9 else f"{logprob_value:.4f}"
+                        )
+                    else:
+                        logprob_display = "N/A"
+                    tooltip_logprobs_block = (
+                        "<div class='tooltip-logprobs-title'>Top logprobs</div>"
+                        f"<div class='tooltip-logprobs'>{tooltip_rows_html}</div>"
+                        if tooltip_rows_html
+                        else "<div class='tooltip-logprobs-title'>Top logprobs</div><div class='tooltip-empty'>No data</div>"
+                    )
+                    tooltip_html = (
+                        "<div class='tooltip'>"
+                        f"<div class='tooltip-entropy'>Entropy: {entropy_display}</div>"
+                        f"<div class='tooltip-logprob'>Logprob: {logprob_display}</div>"
+                        f"{tooltip_logprobs_block}"
+                        "</div>"
+                    )
+                    title_parts = [
+                        f"Token #{row_index} (orig {idx})",
+                        f"logprob: {logprob_display}",
+                        f"entropy: {entropy_display}",
+                    ]
+                    title_attr = " | ".join(title_parts)
                     display_tokens.append(
                         {
                             "row_index": row_index,
                             "original_index": idx,
                             "token_text": token.text,
-                            "display_text": format_token_text(token.text),
-                            "logprob": token.logprob,
+                            "chip_text": format_token_text(token.text),
+                            "response_text": escape(token.text),
+                            "logprob": logprob_value,
                             "entropy": entropy_value,
                             "entropy_numeric": entropy_value,
                             "entropy_attr": entropy_attr,
@@ -287,6 +337,9 @@ class LLMObserverRunner:
                             "is_whitespace": token.text.strip() == "",
                             "chip_style": chip_style,
                             "chip_attr": entropy_attr,
+                            "tooltip_html": tooltip_html,
+                            "title_attr": title_attr,
+                            "logprob_display": logprob_display,
                         }
                     )
 
@@ -301,9 +354,17 @@ class LLMObserverRunner:
                 handle.write("</ul>")
 
                 handle.write("<h3>Generated Response</h3>")
-                handle.write("<pre>")
-                handle.write(escape(observation.response_text))
-                handle.write("</pre>")
+                handle.write("<div class='response-stream'>")
+                for token_info in display_tokens:
+                    response_classes = ["response-token"]
+                    if token_info["is_whitespace"]:
+                        response_classes.append("whitespace")
+                    handle.write(
+                        f"<span class='{' '.join(response_classes)}' data-entropy='{token_info['chip_attr']}' "
+                        f"style='{token_info['chip_style']}' title='{escape(token_info['title_attr'])}'>"
+                        f"{token_info['response_text']}{token_info['tooltip_html']}</span>"
+                    )
+                handle.write("</div>")
 
                 handle.write("<h3>Entropy Overview</h3>")
                 handle.write("<div class='token-stream'>")
@@ -311,20 +372,10 @@ class LLMObserverRunner:
                     classes = ["token-chip"]
                     if token_info["is_whitespace"]:
                         classes.append("whitespace")
-                    title_parts = [
-                        f"Token #{token_info['row_index']} (orig {token_info['original_index']})",
-                        f"logprob: {token_info['logprob']:.4f}",
-                    ]
-                    entropy_val = token_info["entropy_numeric"]
-                    if entropy_val is not None:
-                        title_parts.append(f"entropy: {entropy_val:.4f}")
-                    else:
-                        title_parts.append("entropy: N/A")
-                    title_attr = " | ".join(title_parts)
                     handle.write(
                         f"<span class='{' '.join(classes)}' data-entropy='{token_info['chip_attr']}' "
-                        f"style='{token_info['chip_style']}' title='{escape(title_attr)}'>"
-                        f"{token_info['display_text']}</span>"
+                        f"style='{token_info['chip_style']}' title='{escape(token_info['title_attr'])}'>"
+                        f"{token_info['chip_text']}</span>"
                     )
                 handle.write("</div>")
 
@@ -345,10 +396,8 @@ class LLMObserverRunner:
                         f"{token_info['row_index']}</td>"
                     )
                     token_classes = "token whitespace" if token_info["is_whitespace"] else "token"
-                    handle.write(f"<td class='{token_classes}'>{token_info['display_text']}</td>")
-                    logprob_value = token_info["logprob"]
-                    logprob_display = f"{0.0:.4f}" if abs(logprob_value) < 1e-9 else f"{logprob_value:.4f}"
-                    handle.write(f"<td>{logprob_display}</td>")
+                    handle.write(f"<td class='{token_classes}'>{token_info['chip_text']}</td>")
+                    handle.write(f"<td>{token_info['logprob_display']}</td>")
                     if entropy_value is not None:
                         entropy_display = f"{entropy_value:.4f}"
                         handle.write(
